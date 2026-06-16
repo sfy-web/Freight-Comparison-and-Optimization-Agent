@@ -9,6 +9,16 @@
     <el-button type="primary" plain @click="$emit('export')" :loading="exporting">
       导出比价报告
     </el-button>
+    <el-button
+      v-if="report"
+      type="success"
+      plain
+      @click="$emit('download-word')"
+      :loading="downloadingWord"
+      style="margin-left: 10px;"
+    >
+      生成为Word文档
+    </el-button>
     <pre v-if="report" class="report-content">{{ report }}</pre>
   </div>
 </template>
@@ -16,10 +26,11 @@
 <script setup>
 defineProps({
   report: { type: String, default: '' },
-  exporting: { type: Boolean, default: false }
+  exporting: { type: Boolean, default: false },
+  downloadingWord: { type: Boolean, default: false }
 })
 
-defineEmits(['export'])
+defineEmits(['export', 'download-word'])
 </script>
 
 <style scoped>

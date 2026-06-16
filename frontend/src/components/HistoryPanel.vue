@@ -5,15 +5,24 @@
         <p class="eyebrow">操作记录</p>
         <h2>历史查询</h2>
       </div>
-      <el-button
-        v-if="items.length > 0"
-        type="danger"
-        size="small"
-        plain
-        @click="handleClear"
-      >
-        清空
-      </el-button>
+      <div v-if="items.length > 0" class="header-actions">
+        <el-button
+          type="primary"
+          size="small"
+          plain
+          @click="$emit('export-history')"
+        >
+          导出历史记录
+        </el-button>
+        <el-button
+          type="danger"
+          size="small"
+          plain
+          @click="handleClear"
+        >
+          清空
+        </el-button>
+      </div>
     </div>
 
     <div v-if="items.length === 0" class="history-empty">
@@ -94,7 +103,7 @@ const props = defineProps({
   items: { type: Array, default: () => [] }
 })
 
-const emit = defineEmits(['clear', 'click-item'])
+const emit = defineEmits(['clear', 'click-item', 'export-history'])
 
 const listRef = ref(null)
 const dialogVisible = ref(false)
@@ -236,6 +245,12 @@ const handleClear = async () => {
   color: #1f2937;
   font-size: 18px;
   line-height: 1.25;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .eyebrow {

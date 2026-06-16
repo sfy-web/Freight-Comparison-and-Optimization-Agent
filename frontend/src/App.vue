@@ -84,7 +84,9 @@
           v-if="result"
           :report="report"
           :exporting="exporting"
+          :downloading-word="downloadingWord"
           @export="handleExport"
+          @download-word="handleDownloadWord"
         />
       </section>
 
@@ -93,6 +95,7 @@
           ref="historyPanelRef"
           :items="historyItems"
           @clear="handleClearHistory"
+          @export-history="handleExportHistory"
         />
       </section>
     </main>
@@ -130,6 +133,7 @@ const result = ref(null)
 const report = ref('')
 const loading = ref(false)
 const exporting = ref(false)
+const downloadingWord = ref(false)
 const flowStep = ref(0)
 const agentSnapshot = ref(null)
 const historyPanelRef = ref(null)
@@ -381,7 +385,8 @@ const handleExport = async () => {
       orig_port: form.value.orig_port,
       dest_port: form.value.dest_port,
       max_days: form.value.max_days || null,
-      priority: form.value.priority || null
+      priority: form.value.priority || null,
+      feedback: agentSnapshot.value?.message || null
     })
     report.value = res.data.report
     ElMessage.success('报告生成成功')
@@ -389,6 +394,58 @@ const handleExport = async () => {
     ElMessage.error('导出失败')
   } finally {
     exporting.value = false
+  }
+}
+
+const handleDownloadWord = async () => {
+  downloadingWord.value = true
+  try {
+    const res = await axios.post('/api/export_docx', {
+      weight: form.value.weight,
+      orig_port: form.value.orig_port,
+      dest_port: form.value.dest_port,
+      max_days: form.value.max_days || null,
+      priority: form.value.priority || null,
+      feedback: agentSnapshot.value?.message || null
+    }, { responseType: 'blob' })
+
+    const url = window.URL.createObjectURL(new Blob([res.data]))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `比价报告_${form.value.orig_port}_${form.value.dest_port}_${form.value.weight}kg.docx`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    window.URL.revokeObjectURL(url)
+    ElMessage.success('Word文档已下载')
+  } catch (e) {
+    ElMessage.error('Word文档生成失败')
+  } finally {
+    downloadingWord.value = false
+  }
+}
+
+const handleExportHistory = async () => {
+  if (historyItems.value.length === 0) {
+    ElMessage.warning('暂无历史记录')
+    return
+  }
+  try {
+    const res = await axios.post('/api/export_history_docx', {
+      items: historyItems.value
+    }, { responseType: 'blob' })
+
+    const url = window.URL.createObjectURL(new Blob([res.data]))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = '历史查询记录.docx'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    window.URL.revokeObjectURL(url)
+    ElMessage.success('历史记录已导出')
+  } catch (e) {
+    ElMessage.error('历史记录导出失败')
   }
 }
 

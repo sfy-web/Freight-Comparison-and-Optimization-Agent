@@ -8,9 +8,38 @@
     <div class="header-badge">
       <span>Agent v2</span>
       <strong>LLM + Rules</strong>
+      <div class="llm-status">
+        <span class="status-dot" :class="llmConnected ? 'connected' : 'disconnected'"></span>
+        <span class="status-text">{{ llmConnected ? 'LLM 已连接' : 'LLM 未连接' }}</span>
+        <span v-if="llmModel" class="status-model">{{ llmModel }}</span>
+      </div>
     </div>
   </header>
 </template>
+
+<script setup>
+import { ref, onMounted } from 'vue'
+
+const llmConnected = ref(false)
+const llmModel = ref('')
+
+const checkStatus = async () => {
+  try {
+    const res = await fetch('/api/status')
+    const data = await res.json()
+    llmConnected.value = data.llm_configured === true
+    llmModel.value = data.llm_model || ''
+  } catch {
+    llmConnected.value = false
+    llmModel.value = ''
+  }
+}
+
+onMounted(checkStatus)
+
+// 每 30 秒刷新一次状态
+setInterval(checkStatus, 30000)
+</script>
 
 <style scoped>
 .header {
@@ -65,6 +94,44 @@
 .header-badge strong {
   color: #0f766e;
   font-size: 15px;
+}
+
+.llm-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  justify-content: flex-end;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.connected {
+  background: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
+}
+
+.status-dot.disconnected {
+  background: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
+}
+
+.status-text {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.status-model {
+  font-size: 11px;
+  color: #94a3b8;
+  background: #f1f5f9;
+  padding: 1px 6px;
+  border-radius: 4px;
 }
 
 @media (max-width: 720px) {

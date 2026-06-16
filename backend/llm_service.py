@@ -27,6 +27,60 @@ PORT_NAME_MAP = {
 # 有效的起运港列表
 VALID_ORIG_PORTS = {"PORT02", "PORT03", "PORT04", "PORT05", "PORT06", "PORT07", "PORT08", "PORT09", "PORT10", "PORT11"}
 
+# 中文数字映射
+_CN_DIGIT = {'零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+             '百': 100, '千': 1000, '万': 10000}
+
+
+def cn_to_number(text: str) -> Optional[float]:
+    """将中文数字字符串转换为阿拉伯数字，支持整数和小数。
+    例：'一百'→100, '三十五'→35, '二百五十'→250, '一万五千'→15000, '三点五'→3.5
+    """
+    if not text or not text.strip():
+        return None
+    text = text.strip()
+
+    # 处理小数：三点五、十二点三
+    if '点' in text:
+        parts = text.split('点', 1)
+        integer_part = cn_to_number(parts[0]) if parts[0] else 0
+        if integer_part is None:
+            return None
+        decimal_str = ''
+        for ch in parts[1]:
+            if ch in _CN_DIGIT and _CN_DIGIT[ch] < 10:
+                decimal_str += str(_CN_DIGIT[ch])
+            else:
+                return None
+        return float(f"{int(integer_part)}.{decimal_str}") if decimal_str else float(integer_part)
+
+    # 检查是否含中文数字字符
+    if not any(ch in _CN_DIGIT for ch in text):
+        return None
+
+    result = 0
+    current = 0  # 当前段的累积值（万以下）
+
+    for ch in text:
+        if ch not in _CN_DIGIT:
+            return None
+        val = _CN_DIGIT[ch]
+        if val >= 10000:  # 万
+            if current == 0:
+                current = 1
+            result += current * val
+            current = 0
+        elif val >= 10:  # 十、百、千
+            if current == 0:
+                current = 1  # "十"前面省略1 → 10
+            current *= val
+        else:  # 个位数字
+            if current > 0:
+                result += current  # 先把之前的高位段加入结果
+            current = val
+    result += current
+    return float(result) if result > 0 else None
+
 
 def resolve_port_name(text: str) -> Optional[str]:
     """将自然语言港口名解析为PORT代码，支持直接PORT代码和中文/英文名称"""
@@ -69,7 +123,13 @@ def extract_ports_from_text(text: str):
             orig_port = f"PORT{port_codes[0]}" if f"PORT{port_codes[0]}" in VALID_ORIG_PORTS else None
             dest_port = f"PORT{port_codes[1]}" if f"PORT{port_codes[1]}" in VALID_ORIG_PORTS else None
         elif len(port_codes) == 1:
-            orig_port = f"PORT{port_codes[0]}" if f"PORT{port_codes[0]}" in VALID_ORIG_PORTS else None
+            code = f"PORT{port_codes[0]}"
+            if code in VALID_ORIG_PORTS:
+                # 检查方向词：有"到/运到/送到"则为目的港，否则默认起运港
+                if re.search(r'(?:运|发|送|寄)?到\s*PORT', text, re.IGNORECASE):
+                    dest_port = code
+                else:
+                    orig_port = code
 
     # 模式3: 逐词匹配中文港口名（兜底）
     if not orig_port:
@@ -100,8 +160,8 @@ class LLMService:
 
     def __init__(self, tool_manager=None):
         self.api_key = os.getenv("DASHSCOPE_API_KEY", "")
-        self.model = os.getenv("DASHSCOPE_MODEL", "mimo-v2.5")
-        self.base_url = "https://token-plan-cn.xiaomimimo.com/v1"
+        self.model = os.getenv("DASHSCOPE_MODEL", "mimo-v2.5-pro")
+        self.base_url = os.getenv("DASHSCOPE_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
         self.client = None
         self.sessions: Dict[str, ConversationSession] = {}
         self.tool_manager = tool_manager
@@ -686,18 +746,8 @@ class LLMService:
         """
         result = {"weight": None, "orig_port": None, "dest_port": None, "max_days": None, "priority": None}
 
-        # 提取重量（支持kg/公斤/千克/吨/斤）
-        weight_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:kg|公斤|千克)', text, re.IGNORECASE)
-        if weight_match:
-            result["weight"] = float(weight_match.group(1))
-        else:
-            ton_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:吨|tons?)', text, re.IGNORECASE)
-            if ton_match:
-                result["weight"] = float(ton_match.group(1)) * 1000
-            else:
-                jin_match = re.search(r'(\d+(?:\.\d+)?)\s*斤', text, re.IGNORECASE)
-                if jin_match:
-                    result["weight"] = float(jin_match.group(1)) / 2
+        # 提取重量（支持阿拉伯数字 + 中文数字 + kg/公斤/千克/吨/斤）
+        result["weight"] = self._extract_weight(text)
 
         # 提取港口（不自动补全）
         orig_port, dest_port = extract_ports_from_text(text)
@@ -759,6 +809,44 @@ class LLMService:
         for p in cost_patterns:
             if re.search(p, text, re.IGNORECASE):
                 return "cost"
+        return None
+
+    def _extract_weight(self, text: str) -> Optional[float]:
+        """提取重量，支持阿拉伯数字和中文数字，单位: kg/公斤/千克/吨/斤"""
+        # 1. 阿拉伯数字 + 单位
+        weight_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:kg|公斤|千克)', text, re.IGNORECASE)
+        if weight_match:
+            return float(weight_match.group(1))
+
+        ton_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:吨|tons?)', text, re.IGNORECASE)
+        if ton_match:
+            return float(ton_match.group(1)) * 1000
+
+        jin_match = re.search(r'(\d+(?:\.\d+)?)\s*斤', text, re.IGNORECASE)
+        if jin_match:
+            return float(jin_match.group(1)) / 2
+
+        # 2. 中文数字 + 单位
+        cn_num_pattern = r'([零一二两三四五六七八九十百千万]+(?:点[零一二三四五六七八九]+)?)'
+        cn_kg = re.search(cn_num_pattern + r'\s*(?:公斤|千克)', text)
+        if cn_kg:
+            val = cn_to_number(cn_kg.group(1))
+            if val is not None:
+                return val
+
+        cn_ton = re.search(cn_num_pattern + r'\s*吨', text)
+        if cn_ton:
+            val = cn_to_number(cn_ton.group(1))
+            if val is not None:
+                return val * 1000
+
+        cn_jin = re.search(cn_num_pattern + r'\s*斤', text)
+        if cn_jin:
+            val = cn_to_number(cn_jin.group(1))
+            if val is not None:
+                return val / 2
+
+        # 3. 中文数字 + "公斤"/"千克" 无空格的情况已在上面处理
         return None
 
     def classify_intent(self, text: str) -> Dict[str, Any]:
@@ -1048,7 +1136,11 @@ class LLMService:
             confidence = "medium"
 
         llm_message = parsed.get("message", "") or ""
-        if not llm_message:
+        # 当有缺失字段时，始终基于最终解析结果重新生成提示，
+        # 不信任 LLM 原始 message（可能与合并后的实际状态不一致）
+        if missing:
+            llm_message = self._build_clarification_message(intent, normalized_order, missing)
+        elif not llm_message:
             llm_message = self._build_clarification_message(intent, normalized_order, missing)
 
         return {
@@ -1503,20 +1595,8 @@ class LLMService:
         """无API时的解析，支持中文港口名和PORT代码"""
         result = {"weight": None, "orig_port": None, "dest_port": None, "max_days": None, "priority": None}
 
-        # 提取重量（支持kg/公斤/千克/吨/斤）
-        weight_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:kg|公斤|千克)', text, re.IGNORECASE)
-        if weight_match:
-            result["weight"] = float(weight_match.group(1))
-        else:
-            # 支持"吨"（1吨 = 1000kg）
-            ton_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:吨|tons?)', text, re.IGNORECASE)
-            if ton_match:
-                result["weight"] = float(ton_match.group(1)) * 1000
-            else:
-                # 支持"斤"（1斤 = 0.5kg）
-                jin_match = re.search(r'(\d+(?:\.\d+)?)\s*斤', text, re.IGNORECASE)
-                if jin_match:
-                    result["weight"] = float(jin_match.group(1)) / 2
+        # 提取重量（支持阿拉伯数字 + 中文数字 + kg/公斤/千克/吨/斤）
+        result["weight"] = self._extract_weight(text)
 
         # 使用通用函数提取港口
         orig_port, dest_port = extract_ports_from_text(text)

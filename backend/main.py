@@ -17,6 +17,10 @@ if os.path.exists(env_path):
                 os.environ[key.strip()] = value.strip()
 
 from models import OrderRequest, ComparisonResult
+
+
+class DocxExportRequest(OrderRequest):
+    feedback: Optional[str] = None
 from freight_service import FreightService, CSVDataStore
 
 # 工具管理器导入
@@ -656,11 +660,11 @@ async def get_session_status(session_id: str):
 
 
 @app.post("/api/export")
-async def export_report(order: OrderRequest):
+async def export_report(order: DocxExportRequest):
     """导出比价报告"""
     try:
         result = freight_service.compare(order)
-        report = generate_report(result)
+        report = generate_report(result, feedback=order.feedback)
         return {"report": report}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -676,7 +680,7 @@ async def get_status():
     }
 
 
-def generate_report(result: ComparisonResult) -> str:
+def generate_report(result: ComparisonResult, feedback: str = None) -> str:
     """生成比价报告文本"""
     lines = []
     lines.append("=" * 60)
@@ -703,6 +707,10 @@ def generate_report(result: ComparisonResult) -> str:
             lines.append(f"{plan.carrier:<12} {mode_cn:<8} {service_cn:<8} {plan.transport_days:<6} ${plan.total_cost:<11.2f} {plan.cost_formula}")
 
     lines.append("")
+    if feedback:
+        lines.append("【AI 推荐理由】")
+        lines.append(feedback)
+        lines.append("")
     if result.recommended_plan:
         lines.append("【推荐方案】")
         lines.append(f"  承运商: {result.recommended_plan.plan.carrier}")
@@ -721,6 +729,228 @@ def generate_report(result: ComparisonResult) -> str:
     return "\n".join(lines)
 
 
+# ================================================================
+# Word 文档导出
+# ================================================================
+
+def generate_docx(result: ComparisonResult, feedback: str = None) -> bytes:
+    """生成比价报告 Word 文档，返回 bytes"""
+    from docx import Document
+    from docx.shared import Inches, Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from io import BytesIO
+
+    doc = Document()
+
+    # 标题
+    title = doc.add_heading('运输方案比价报告', level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # 订单信息
+    doc.add_heading('订单信息', level=1)
+    table = doc.add_table(rows=1, cols=2)
+    table.style = 'Light Grid Accent 1'
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    cells = table.rows[0].cells
+    cells[0].text = '项目'
+    cells[1].text = '内容'
+
+    order_rows = [
+        ('起运港', result.order_info.orig_port),
+        ('目的港', result.order_info.dest_port),
+        ('货物重量', f'{result.order_info.weight} kg'),
+    ]
+    if result.order_info.max_days:
+        order_rows.append(('时效要求', f'≤ {result.order_info.max_days} 天'))
+    if result.order_info.priority:
+        pri_cn = '时效优先' if result.order_info.priority == 'time' else '成本优先'
+        order_rows.append(('优先级', pri_cn))
+
+    for label, value in order_rows:
+        row = table.add_row()
+        row.cells[0].text = label
+        row.cells[1].text = str(value)
+
+    # 方案列表
+    doc.add_heading(f'查询结果（共 {result.total_plans_found} 个方案）', level=1)
+
+    if result.available_plans:
+        headers = ['承运商', '运输方式', '服务级别', '运输天数', '总成本', '综合评分']
+        plan_table = doc.add_table(rows=1, cols=len(headers))
+        plan_table.style = 'Light Grid Accent 1'
+        plan_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        for i, h in enumerate(headers):
+            plan_table.rows[0].cells[i].text = h
+
+        for plan in result.available_plans:
+            row = plan_table.add_row()
+            row.cells[0].text = plan.carrier
+            row.cells[1].text = '空运' if plan.mode == 'AIR' else '陆运'
+            row.cells[2].text = '门到门' if plan.service_level == 'DTD' else '门到港'
+            row.cells[3].text = f'{plan.transport_days} 天'
+            row.cells[4].text = f'${plan.total_cost:.2f}'
+            row.cells[5].text = f'{plan.score:.3f}'
+
+    # AI 反馈推荐（LLM 生成的推荐理由）
+    if feedback:
+        doc.add_heading('AI 推荐理由', level=1)
+        fb_para = doc.add_paragraph(feedback)
+        fb_para.paragraph_format.space_after = Pt(12)
+
+    # 推荐方案
+    doc.add_heading('推荐方案', level=1)
+    if result.recommended_plan:
+        rp = result.recommended_plan.plan
+        mode_cn = '空运' if rp.mode == 'AIR' else '陆运'
+        service_cn = '门到门' if rp.service_level == 'DTD' else '门到港'
+
+        rec_table = doc.add_table(rows=6, cols=2)
+        rec_table.style = 'Light Grid Accent 1'
+        rec_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        fields = [
+            ('承运商', rp.carrier),
+            ('运输方式', f'{mode_cn}（{service_cn}）'),
+            ('运输天数', f'{rp.transport_days} 天'),
+            ('总成本', f'${rp.total_cost:.2f}'),
+            ('综合评分', f'{rp.score:.3f} / 1.0'),
+            ('推荐理由', result.recommended_plan.reason),
+        ]
+        for i, (label, value) in enumerate(fields):
+            rec_table.rows[i].cells[0].text = label
+            rec_table.rows[i].cells[1].text = str(value)
+    else:
+        doc.add_paragraph('无满足条件的方案')
+
+    # 页脚
+    doc.add_paragraph('')
+    footer = doc.add_paragraph('本报告由运输方案比价与优化智能体自动生成')
+    footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    footer.runs[0].font.color.rgb = RGBColor(0x94, 0xa3, 0xb8)
+    footer.runs[0].font.size = Pt(9)
+
+    buf = BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def generate_history_docx(items: list) -> bytes:
+    """生成历史查询记录 Word 文档，返回 bytes"""
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from io import BytesIO
+
+    doc = Document()
+
+    title = doc.add_heading('历史查询记录', level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    summary = doc.add_paragraph(f'共 {len(items)} 条记录')
+    summary.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    summary.runs[0].font.color.rgb = RGBColor(0x64, 0x74, 0x8b)
+
+    for idx, item in enumerate(items, 1):
+        # 序号标题
+        doc.add_heading(f'记录 {idx}', level=2)
+
+        # 基本信息表
+        info_table = doc.add_table(rows=3, cols=2)
+        info_table.style = 'Light Grid Accent 1'
+        info_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        info_rows = [
+            ('时间', item.get('timestamp', '')),
+            ('用户输入', item.get('userInput', '')),
+            ('结果类型', item.get('replyType', '')),
+        ]
+        for i, (label, value) in enumerate(info_rows):
+            info_table.rows[i].cells[0].text = label
+            info_table.rows[i].cells[1].text = str(value)
+
+        # 订单信息（如果有）
+        order = item.get('order')
+        if order:
+            order_table = doc.add_table(rows=0, cols=2)
+            order_table.style = 'Light Grid Accent 1'
+            order_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            order_fields = [
+                ('起运港', order.get('orig_port', '')),
+                ('目的港', order.get('dest_port', '')),
+                ('重量', f"{order.get('weight', '')} kg" if order.get('weight') else ''),
+                ('时效', f"{order.get('max_days', '')} 天" if order.get('max_days') else ''),
+            ]
+            for label, value in order_fields:
+                if value:
+                    row = order_table.add_row()
+                    row.cells[0].text = label
+                    row.cells[1].text = str(value)
+
+        # 结果
+        result_str = item.get('result', '')
+        message = item.get('message', '')
+        if result_str:
+            p = doc.add_paragraph()
+            p.add_run('查询结果：').bold = True
+            p.add_run(result_str)
+        elif message:
+            p = doc.add_paragraph()
+            p.add_run('系统回复：').bold = True
+            p.add_run(message[:200])
+
+        # 分隔
+        if idx < len(items):
+            doc.add_paragraph('')
+
+    buf = BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+@app.post("/api/export_docx")
+async def export_docx(order: DocxExportRequest):
+    """导出比价报告 Word 文档"""
+    from fastapi.responses import Response
+    from urllib.parse import quote
+    try:
+        result = freight_service.compare(order)
+        docx_bytes = generate_docx(result, feedback=order.feedback)
+        filename = f"比价报告_{order.orig_port}_{order.dest_port}_{order.weight}kg.docx"
+        encoded = quote(filename)
+        return Response(
+            content=docx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class HistoryExportRequest(BaseModel):
+    items: List[dict]
+
+
+@app.post("/api/export_history_docx")
+async def export_history_docx(request: HistoryExportRequest):
+    """导出历史查询记录 Word 文档"""
+    from fastapi.responses import Response
+    from urllib.parse import quote
+    try:
+        docx_bytes = generate_history_docx(request.items)
+        encoded = quote('历史查询记录.docx')
+        return Response(
+            content=docx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
