@@ -296,6 +296,7 @@ async def upload_data(file: UploadFile = File(...)):
         data_store = DBDataStore(session_factory, auto_init=False)
         data_store._detect_service_rating()
         freight_service = FreightService(data_store)
+        active_data_source = "sqlite"
 
         carriers = sorted(df['Carrier'].unique().tolist())
 
